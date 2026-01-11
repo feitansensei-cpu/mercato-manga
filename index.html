@@ -101,6 +101,42 @@
                 });
         }
 
+        async function refreshLobby() {
+            if (!gameState.roomCode) return;
+            const { data } = await db.from('games').select('data').eq('room_code', gameState.roomCode).single();
+            if (data && data.data) {
+                gameState.players = data.data.players;
+                render();
+            }
+        }
+            if (subscription) subscription.unsubscribe();
+            
+            subscription = db
+                .channel('game-' + code)
+                .on('postgres_changes', 
+                    { event: '*', schema: 'public', table: 'games', filter: `room_code=eq.${code}` },
+                    (payload) => {
+                        if (payload.new && payload.new.data) {
+                            Object.assign(gameState, payload.new.data);
+                            render();
+                        }
+                    }
+                )
+                .subscribe();
+
+            // Charger l'état initial
+            db.from('games')
+                .select('data')
+                .eq('room_code', code)
+                .single()
+                .then(({ data }) => {
+                    if (data && data.data) {
+                        Object.assign(gameState, data.data);
+                        render();
+                    }
+                });
+        }
+
         async function createRoom() {
             if (!gameState.playerName) return alert('Entrez votre pseudo');
             
@@ -279,6 +315,7 @@
                             <div class="grid grid-cols-2 gap-4 mb-8">
                                 ${gameState.players.map(p => `<div class="bg-slate-700/50 rounded-lg p-4 border border-purple-500/30 text-white font-semibold">${p.isHost?'👑 ':''}${p.name}</div>`).join('')}
                             </div>
+                            <button onclick="window.refreshLobby()" class="w-full bg-blue-600 text-white py-3 rounded-lg font-bold mb-4 hover:bg-blue-700">🔄 Actualiser le lobby</button>
                             ${gameState.isHost ? `<button onclick="window.startGame()" class="w-full bg-gradient-to-r from-green-600 to-emerald-600 text-white py-4 rounded-lg font-bold text-xl hover:from-green-700 hover:to-emerald-700">🚀 Démarrer</button>` : `<p class="text-center text-purple-300 text-lg">En attente de l'hôte...</p>`}
                         </div>
                     </div>
@@ -414,6 +451,7 @@
 
         window.createRoom = createRoom;
         window.joinRoom = joinRoom;
+        window.refreshLobby = refreshLobby;
         window.startGame = startGame;
         window.chooseTheme = chooseTheme;
         window.chooseCondition = chooseCondition;
