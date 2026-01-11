@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mercato Manga</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Impact&display=swap');
+        .title-font { font-family: Impact, fantasy; }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 min-h-screen">
+    <div id="app"></div>
+
+    <script>
+        const { createClient } = supabase;
+        
+        // TA CONFIG SUPABASE RÉELLE
+        const supabaseUrl = 'https://jgeckacopzyyqucneorw.supabase.co';
+        const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpnZWNrYWNvcHp5eXF1Y25lb3J3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjgxNTMyNTAsImV4cCI6MjA4MzcyOTI1MH0.ru0E-jHKqUafHB4IsGvX5pAwPn8iGOY68dW_QKRir34';
+        const db = createClient(supabaseUrl, supabaseKey);
+
+        const CHARACTERS_DB = {
+            'One Piece': ['Monkey D. Luffy', 'Roronoa Zoro', 'Sanji', 'Nami', 'Nico Robin', 'Trafalgar Law', 'Portgas D. Ace', 'Sabo', 'Shanks', 'Kaido', 'Big Mom', 'Doflamingo', 'Katakuri', 'Marco', 'King', 'Yamato', 'Jinbe', 'Boa Hancock', 'Mihawk', 'Crocodile', 'Enel', 'Kizaru', 'Akainu', 'Aokiji', 'Fujitora', 'Smoker', 'Garp', 'Sengoku', 'Barbe Blanche', 'Barbe Noire', 'Eustass Kid', 'Killer', 'Basil Hawkins', 'X Drake', 'Bartolomeo', 'Cavendish', 'Oden Kozuki', 'Kyros', 'Rebecca', 'Diamante', 'Vergo', 'Pica', 'Franky', 'Brook', 'Chopper', 'Usopp', 'Carrot', 'Pedro'],
+            'Naruto': ['Naruto Uzumaki', 'Sasuke Uchiha', 'Kakashi Hatake', 'Sakura Haruno', 'Itachi Uchiha', 'Madara Uchiha', 'Hashirama Senju', 'Tobirama Senju', 'Minato Namikaze', 'Jiraiya', 'Tsunade', 'Orochimaru', 'Pain (Nagato)', 'Obito Uchiha', 'Might Guy', 'Rock Lee', 'Gaara', 'Killer Bee', 'Shikamaru Nara', 'Neji Hyuga', 'Hinata Hyuga', 'Kaguya Otsutsuki'],
+            'Dragon Ball': ['Goku', 'Vegeta', 'Gohan', 'Piccolo', 'Frieza', 'Cell', 'Majin Buu', 'Broly', 'Beerus', 'Whis', 'Jiren', 'Hit', 'Goku Black', 'Zamasu', 'Trunks', 'Goten', 'Gotenks', 'Vegito', 'Gogeta', 'Krillin']
+        };
+
+        const WIN_CONDITIONS = {
+            'One Piece': ['Équipe la plus puissante', 'Équipe d\'un même arc', 'Équipe avec porteurs du D', 'Équipe Worst Generation', 'Escorte client (5pts/-1pt)', 'Infiltrer Impel Down', 'TROIS ENJEUX simultanés', 'Défendre une base'],
+            'Naruto': ['Équipe la plus puissante', 'Même village', 'Akatsuki uniquement', 'Mission rang S'],
+            'Dragon Ball': ['Équipe la plus puissante', 'Saiyans uniquement', 'Tournament of Power']
+        };
+
+        let gameState = {
+            screen: 'menu',
+            roomCode: '',
+            playerName: '',
+            isHost: false,
+            theme: '',
+            players: [],
+            winCondition: '',
+            characters: [],
+            currentCharIndex: 0,
+            currentBid: 0,
+            currentBidder: 0,
+            smallBlindPlayer: 0,
+            votes: {},
+            playersWhoPassed: [],
+            highestBidderIndex: -1
+        };
+
+        let subscription = null;
+
+        function generateCode() {
+            return Array.from({length: 6}, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
+        }
+
+        async function saveGame() {
+            if (!gameState.roomCode) return;
+            
+            const { error } = await db
+                .from('games')
+                .upsert({ 
+                    room_code: gameState.roomCode, 
+                    data: gameState,
+                    updated_at: new Date().toISOString()
+                });
+            
+            if (error) console.error('Erreur save:', error);
+        }
+
+        function listenToRoom(code) {
+            if (subscription) subscription.unsubscribe();
+            
+            subscription = db
+                .channel('game-' + code)
+                .on('postgres_changes', 
+                    { event: '*', schema: 'public', table: 'games', filter: `room_code=eq.${code}` },
+                    (payload) => {
+                        if (payload.new && payload.new.data) {
+                            Object.assign(gameState, payload.new.data);
+                            render();
+                        }
+                    }
+                )
+                .subscribe();
+
+            // Charger l'état initial
+            db.from('games')
+                .select('data')
+                .eq('room_code', code)
+                .single()
+                .then(({ data }) => {
+                    if (data && data.data) {
+                        Object.assign(gameState, data.data);
+                        render();
+                    }
+                });
+        }
+
+        async function createRoom() {
+            if (!gameState.playerName) return alert('Entrez votre pseudo');
+            
+            gameState.roomCode = generateCode();
+            gameState.isHost = true;
+            gameState.screen = 'lobby';
+            gameState.players = [{
+                name: gameState.playerName,
+                budget: 200000,
+                team: [],
+                isHost: true
+            }];
+
+            await saveGame();
+            listenToRoom(gameState.roomCode);
+            render();
+        }
+
+        async function joinRoom() {
+            if (!gameState.playerName || !gameState.roomCode) return alert('Remplissez tout');
+            
+            listenToRoom(gameState.roomCode);
+            
+            setTimeout(async () => {
+                if (!gameState.players.find(p => p.name === gameState.playerName)) {
+                    gameState.players.push({
+                        name: gameState.playerName,
+                        budget: 200000,
+                        team: [],
+                        isHost: false
+                    });
+                    await saveGame();
+                }
+                gameState.screen = 'lobby';
+                render();
+            }, 1000);
+        }
+
+        async function startGame() {
+            if (!gameState.isHost || gameState.players.length < 2) return alert('2+ joueurs');
+            gameState.screen = 'theme';
+            await saveGame();
+        }
+
+        async function chooseTheme(theme) {
+            if (!gameState.isHost) return;
+            gameState.theme = theme;
+            gameState.screen = 'condition';
+            await saveGame();
+        }
+
+        async function chooseCondition(cond) {
+            if (!gameState.isHost) return;
+            gameState.winCondition = cond;
+            
+            const all = [...CHARACTERS_DB[gameState.theme]];
+            gameState.characters = all.sort(() => Math.random() - 0.5).slice(0, gameState.players.length * 5);
+            gameState.currentCharIndex = 0;
+            gameState.currentBid = 0;
+            gameState.currentBidder = 0;
+            gameState.smallBlindPlayer = 0;
+            gameState.players[0].budget -= 10000;
+            gameState.screen = 'auction';
+            
+            await saveGame();
+        }
+
+        async function placeBid(amount) {
+            const myIdx = gameState.players.findIndex(p => p.name === gameState.playerName);
+            if (myIdx !== gameState.currentBidder) return alert('Pas votre tour');
+            if (amount <= gameState.currentBid) return alert('Trop bas');
+            if (amount > gameState.players[myIdx].budget) return alert('Budget insuffisant');
+
+            gameState.currentBid = amount;
+            gameState.highestBidderIndex = myIdx;
+            gameState.playersWhoPassed = gameState.playersWhoPassed.filter(i => i !== myIdx);
+
+            let next = (myIdx + 1) % gameState.players.length;
+            while (gameState.playersWhoPassed.includes(next) && gameState.playersWhoPassed.length < gameState.players.length - 1) {
+                next = (next + 1) % gameState.players.length;
+            }
+            gameState.currentBidder = next;
+
+            await saveGame();
+        }
+
+        async function passBid() {
+            const myIdx = gameState.players.findIndex(p => p.name === gameState.playerName);
+            if (myIdx !== gameState.currentBidder) return;
+
+            gameState.playersWhoPassed.push(myIdx);
+
+            let next = (myIdx + 1) % gameState.players.length;
+            while (gameState.playersWhoPassed.includes(next) && gameState.playersWhoPassed.length < gameState.players.length - 1) {
+                next = (next + 1) % gameState.players.length;
+            }
+
+            const allPassed = gameState.playersWhoPassed.length >= gameState.players.length - 1;
+
+            if (allPassed && gameState.highestBidderIndex >= 0) {
+                const winner = gameState.players[gameState.highestBidderIndex];
+                winner.team.push(gameState.characters[gameState.currentCharIndex]);
+                winner.budget -= gameState.currentBid;
+
+                if (gameState.players.every(p => p.team.length >= 5)) {
+                    gameState.screen = 'vote';
+                } else {
+                    const nextIdx = gameState.currentCharIndex + 1;
+                    const nextSB = (gameState.smallBlindPlayer + 1) % gameState.players.length;
+                    gameState.players[nextSB].budget -= 10000;
+                    gameState.currentCharIndex = nextIdx;
+                    gameState.currentBid = 0;
+                    gameState.currentBidder = nextSB;
+                    gameState.smallBlindPlayer = nextSB;
+                    gameState.playersWhoPassed = [];
+                    gameState.highestBidderIndex = -1;
+                }
+            } else {
+                gameState.currentBidder = next;
+            }
+
+            await saveGame();
+        }
+
+        async function vote(target, value) {
+            if (!gameState.votes[gameState.playerName]) {
+                gameState.votes[gameState.playerName] = {};
+            }
+            gameState.votes[gameState.playerName][target] = value;
+            await saveGame();
+        }
+
+        async function showResults() {
+            if (!gameState.isHost) return;
+            gameState.screen = 'results';
+            await saveGame();
+        }
+
+        function calculateResults() {
+            const scores = {};
+            gameState.players.forEach(p => scores[p.name] = 0);
+            Object.values(gameState.votes).forEach(v => {
+                Object.entries(v).forEach(([t, val]) => scores[t] += val);
+            });
+            return Object.entries(scores).sort((a,b) => b[1]-a[1]).map(([n,s]) => ({name:n, score:s}));
+        }
+
+        function render() {
+            const app = document.getElementById('app');
+            
+            if (gameState.screen === 'menu') {
+                app.innerHTML = `
+                    <div class="min-h-screen flex items-center justify-center p-6">
+                        <div class="max-w-md w-full">
+                            <h1 class="text-6xl font-black text-center mb-12 bg-gradient-to-r from-yellow-400 via-red-500 to-pink-500 text-transparent bg-clip-text title-font">MERCATO MANGA</h1>
+                            <div class="bg-slate-800/50 rounded-2xl p-8 border border-purple-500/30">
+                                <input id="pn" placeholder="Votre pseudo" class="w-full px-4 py-3 bg-slate-700 border border-purple-500/50 rounded-lg text-white mb-6" />
+                                <button onclick="window.createRoom()" class="w-full bg-gradient-to-r from-purple-600 to-pink-600 text-white py-3 rounded-lg font-bold mb-3 hover:from-purple-700 hover:to-pink-700">🎮 Créer une partie</button>
+                                <div class="relative my-6"><div class="absolute inset-0 flex items-center"><div class="w-full border-t border-purple-500/30"></div></div><div class="relative flex justify-center"><span class="px-4 bg-slate-800/50 text-purple-300 text-sm">ou</span></div></div>
+                                <input id="rc" placeholder="Code de la partie" class="w-full px-4 py-3 bg-slate-700 border border-purple-500/50 rounded-lg text-white mb-3 uppercase" />
+                                <button onclick="window.joinRoom()" class="w-full bg-gradient-to-r from-blue-600 to-cyan-600 text-white py-3 rounded-lg font-bold hover:from-blue-700 hover:to-cyan-700">🔗 Rejoindre</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                document.getElementById('pn').oninput = e => gameState.playerName = e.target.value;
+                document.getElementById('rc').oninput = e => gameState.roomCode = e.target.value.toUpperCase();
+            }
+            else if (gameState.screen === 'lobby') {
+                app.innerHTML = `
+                    <div class="min-h-screen p-6">
+                        <div class="max-w-4xl mx-auto bg-slate-800/50 rounded-2xl p-8 border border-purple-500/30">
+                            <h2 class="text-4xl font-black text-center mb-4 bg-gradient-to-r from-yellow-400 to-pink-500 text-transparent bg-clip-text title-font">LOBBY</h2>
+                            <p class="text-purple-300 text-xl text-center mb-8">Code: <span class="text-yellow-400 font-bold text-3xl">${gameState.roomCode}</span></p>
+                            <h3 class="text-2xl font-bold text-white mb-4">Joueurs (${gameState.players.length})</h3>
+                            <div class="grid grid-cols-2 gap-4 mb-8">
+                                ${gameState.players.map(p => `<div class="bg-slate-700/50 rounded-lg p-4 border border-purple-500/30 text-white font-semibold">${p.isHost?'👑 ':''}${p.name}</div>`).join('')}
+                            </div>
+                            ${gameState.isHost ? `<button onclick="window.startGame()" class="w-full bg-gradient-to-r from-green-600 to-emerald-600 text-white py-4 rounded-lg font-bold text-xl hover:from-green-700 hover:to-emerald-700">🚀 Démarrer</button>` : `<p class="text-center text-purple-300 text-lg">En attente de l'hôte...</p>`}
+                        </div>
+                    </div>
+                `;
+            }
+            else if (gameState.screen === 'theme') {
+                app.innerHTML = `
+                    <div class="min-h-screen p-6">
+                        <div class="max-w-4xl mx-auto bg-slate-800/50 rounded-2xl p-8 border border-purple-500/30">
+                            <h2 class="text-4xl font-black text-center mb-8 bg-gradient-to-r from-yellow-400 to-pink-500 text-transparent bg-clip-text title-font">CHOISIR LE MANGA</h2>
+                            ${gameState.isHost ? `
+                                <div class="grid grid-cols-2 gap-4">
+                                    ${Object.keys(CHARACTERS_DB).map(t => `<button onclick="window.chooseTheme('${t}')" class="bg-gradient-to-r from-purple-600 to-pink-600 text-white p-6 rounded-lg font-bold text-2xl hover:from-purple-700 hover:to-pink-700">${t}</button>`).join('')}
+                                </div>
+                            ` : `<p class="text-center text-purple-300 text-xl">L'hôte choisit le manga...</p>`}
+                        </div>
+                    </div>
+                `;
+            }
+            else if (gameState.screen === 'condition') {
+                app.innerHTML = `
+                    <div class="min-h-screen p-6">
+                        <div class="max-w-6xl mx-auto bg-slate-800/50 rounded-2xl p-8 border border-purple-500/30">
+                            <h2 class="text-4xl font-black text-center mb-8 bg-gradient-to-r from-yellow-400 to-pink-500 text-transparent bg-clip-text title-font">CONDITION DE VICTOIRE</h2>
+                            ${gameState.isHost ? `
+                                <div class="grid grid-cols-2 gap-4">
+                                    ${WIN_CONDITIONS[gameState.theme].map(c => `<button onclick='window.chooseCondition(\`${c}\`)' class="bg-slate-700/50 border border-purple-500/30 text-white p-6 rounded-lg font-semibold text-lg hover:bg-purple-600/30 text-left">${c}</button>`).join('')}
+                                </div>
+                            ` : `<p class="text-center text-purple-300 text-xl">L'hôte choisit la condition...</p>`}
+                        </div>
+                    </div>
+                `;
+            }
+            else if (gameState.screen === 'auction') {
+                const me = gameState.players.find(p => p.name === gameState.playerName);
+                const curr = gameState.players[gameState.currentBidder];
+                const myTurn = curr?.name === gameState.playerName;
+                const myIdx = gameState.players.findIndex(p => p.name === gameState.playerName);
+                const passed = gameState.playersWhoPassed.includes(myIdx);
+
+                app.innerHTML = `
+                    <div class="min-h-screen p-6">
+                        <div class="max-w-7xl mx-auto grid grid-cols-3 gap-6">
+                            <div class="space-y-6">
+                                <div class="bg-slate-800/50 rounded-2xl p-6 border border-purple-500/30">
+                                    <h3 class="text-2xl font-bold text-white mb-4">Votre budget</h3>
+                                    <div class="bg-green-600 rounded-lg p-4"><p class="text-white text-3xl font-bold">${me?.budget.toLocaleString()}₿</p></div>
+                                </div>
+                                <div class="bg-slate-800/50 rounded-2xl p-6 border border-purple-500/30">
+                                    <h3 class="text-2xl font-bold text-white mb-4">Équipe (${me?.team.length}/5)</h3>
+                                    ${(me?.team || []).map(c => `<div class="bg-purple-600/30 rounded-lg p-3 mb-2 text-white font-semibold">${c}</div>`).join('') || '<p class="text-purple-300 text-center">Aucun</p>'}
+                                </div>
+                            </div>
+                            <div class="bg-slate-800/50 rounded-2xl p-8 border border-purple-500/30">
+                                <h2 class="text-3xl font-black text-center mb-6 bg-gradient-to-r from-yellow-400 to-pink-500 text-transparent bg-clip-text title-font">ENCHÈRES</h2>
+                                <div class="bg-gradient-to-r from-purple-600 to-pink-600 rounded-2xl p-8 mb-6">
+                                    <p class="text-3xl font-bold text-white text-center">${gameState.characters[gameState.currentCharIndex]}</p>
+                                </div>
+                                <div class="bg-slate-700/50 rounded-lg p-4 mb-6"><p class="text-white text-xl">Enchère: <span class="text-yellow-400 font-bold">${gameState.currentBid.toLocaleString()}₿</span></p></div>
+                                <p class="text-purple-300 mb-4">Tour de: <span class="text-yellow-400 font-bold">${curr?.name}</span></p>
+                                ${myTurn ? (passed ? `<p class="text-red-400 text-center">Vous avez passé</p>` : `
+                                    <input id="ba" type="number" placeholder="Montant" class="w-full px-4 py-3 bg-slate-700 border border-purple-500/50 rounded-lg text-white mb-3 focus:outline-none" />
+                                    <button onclick="window.placeBid(parseInt(document.getElementById('ba').value))" class="w-full bg-gradient-to-r from-green-600 to-emerald-600 text-white py-3 rounded-lg font-bold mb-3 hover:from-green-700 hover:to-emerald-700">💰 Enchérir</button>
+                                    <button onclick="window.passBid()" class="w-full bg-gradient-to-r from-red-600 to-pink-600 text-white py-3 rounded-lg font-bold hover:from-red-700 hover:to-pink-700">⏭️ Passer</button>
+                                `) : `<p class="text-center text-purple-300">Attendez votre tour...</p>`}
+                            </div>
+                            <div class="space-y-4">
+                                <h3 class="text-2xl font-bold text-white">Autres joueurs</h3>
+                                ${gameState.players.filter(p => p.name !== gameState.playerName).map(p => `
+                                    <div class="bg-slate-700/50 rounded-lg p-4 border border-purple-500/20">
+                                        <p class="text-white font-bold mb-2">${p.name}</p>
+                                        <p class="text-purple-300">${p.budget.toLocaleString()}₿</p>
+                                        <p class="text-purple-400 text-sm">Équipe: ${p.team.length}/5</p>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+            else if (gameState.screen === 'vote') {
+                const myVotes = gameState.votes[gameState.playerName] || {};
+                const allVoted = Object.keys(gameState.votes).length >= gameState.players.length;
+
+                app.innerHTML = `
+                    <div class="min-h-screen p-6">
+                        <div class="max-w-6xl mx-auto bg-slate-800/50 rounded-2xl p-8 border border-purple-500/30">
+                            <h2 class="text-4xl font-black text-center mb-8 bg-gradient-to-r from-yellow-400 to-pink-500 text-transparent bg-clip-text title-font">PHASE DE VOTE</h2>
+                            <div class="bg-yellow-500/20 border border-yellow-500/50 rounded-lg p-6 mb-8"><p class="text-yellow-400 text-2xl font-bold">${gameState.winCondition}</p></div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                ${gameState.players.map(p => `
+                                    <div class="bg-slate-700/50 rounded-lg p-6 border border-purple-500/30">
+                                        <h3 class="text-2xl font-bold text-white mb-4">${p.name}</h3>
+                                        <div class="space-y-2 mb-4">
+                                            ${p.team.map(c => `<div class="bg-purple-600/30 rounded-lg p-2"><p class="text-white">${c}</p></div>`).join('')}
+                                        </div>
+                                        ${p.name !== gameState.playerName ? `
+                                            <div class="flex gap-2">
+                                                <button onclick="window.vote('${p.name}', 1)" class="flex-1 ${myVotes[p.name] === 1 ? 'bg-green-600' : 'bg-slate-600'} text-white py-2 rounded-lg font-bold hover:bg-green-700">1 pt</button>
+                                                <button onclick="window.vote('${p.name}', 0.5)" class="flex-1 ${myVotes[p.name] === 0.5 ? 'bg-blue-600' : 'bg-slate-600'} text-white py-2 rounded-lg font-bold hover:bg-blue-700">0.5 pt</button>
+                                            </div>
+                                        ` : ''}
+                                    </div>
+                                `).join('')}
+                            </div>
+                            ${gameState.isHost && allVoted ? `<button onclick="window.showResults()" class="w-full bg-gradient-to-r from-yellow-600 to-orange-600 text-white py-4 rounded-lg font-bold text-xl hover:from-yellow-700 hover:to-orange-700 mt-8">🏆 Afficher les résultats</button>` : ''}
+                        </div>
+                    </div>
+                `;
+            }
+            else if (gameState.screen === 'results') {
+                const results = calculateResults();
+                app.innerHTML = `
+                    <div class="min-h-screen p-6">
+                        <div class="max-w-4xl mx-auto bg-slate-800/50 rounded-2xl p-8 border border-purple-500/30">
+                            <h2 class="text-5xl font-black text-center mb-8 bg-gradient-to-r from-yellow-400 to-pink-500 text-transparent bg-clip-text title-font">🏆 RÉSULTATS 🏆</h2>
+                            <div class="space-y-4 mb-8">
+                                ${results.map((r, i) => `
+                                    <div class="bg-gradient-to-r ${i===0?'from-yellow-600 to-orange-600':i===1?'from-slate-400 to-slate-600':i===2?'from-amber-700 to-amber-900':'from-slate-700 to-slate-800'} rounded-lg p-6">
+                                        <div class="flex justify-between items-center">
+                                            <span class="text-white text-2xl font-bold">${i===0?'🥇':i===1?'🥈':i===2?'🥉':''} ${i+1}. ${r.name}</span>
+                                            <span class="text-white text-3xl font-bold">${r.score} pts</span>
+                                        </div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                            <button onclick="location.reload()" class="w-full bg-gradient-to-r from-purple-600 to-pink-600 text-white py-3 rounded-lg font-bold hover:from-purple-700 hover:to-pink-700">🔄 Nouvelle partie</button>
+                        </div>
+                    </div>
+                `;
+            }
+        }
+
+        window.createRoom = createRoom;
+        window.joinRoom = joinRoom;
+        window.startGame = startGame;
+        window.chooseTheme = chooseTheme;
+        window.chooseCondition = chooseCondition;
+        window.placeBid = placeBid;
+        window.passBid = passBid;
+        window.vote = vote;
+        window.showResults = showResults;
+
+        render();
+    </script>
+</body>
+</html>
