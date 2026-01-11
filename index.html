@@ -52,7 +52,36 @@
             highestBidderIndex: -1
         };
 
-        let subscription = null;
+        let pollInterval = null;
+
+        async function startPolling(code) {
+            if (pollInterval) clearInterval(pollInterval);
+            
+            // Poll toutes les 2 secondes
+            pollInterval = setInterval(async () => {
+                try {
+                    const { data } = await db.from('games').select('data').eq('room_code', code).single();
+                    if (data && data.data) {
+                        // Ne pas écraser playerName et roomCode locaux
+                        const myName = gameState.playerName;
+                        const myCode = gameState.roomCode;
+                        Object.assign(gameState, data.data);
+                        gameState.playerName = myName;
+                        gameState.roomCode = myCode;
+                        render();
+                    }
+                } catch (err) {
+                    console.error('Poll error:', err);
+                }
+            }, 2000);
+        }
+
+        function stopPolling() {
+            if (pollInterval) {
+                clearInterval(pollInterval);
+                pollInterval = null;
+            }
+        }
 
         function generateCode() {
             return Array.from({length: 6}, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
@@ -72,42 +101,24 @@
             if (error) console.error('Erreur save:', error);
         }
 
-        function listenToRoom(code) {
-            if (subscription) subscription.unsubscribe();
-            
-            subscription = db
-                .channel('game-' + code)
-                .on('postgres_changes', 
-                    { event: '*', schema: 'public', table: 'games', filter: `room_code=eq.${code}` },
-                    (payload) => {
-                        if (payload.new && payload.new.data) {
-                            Object.assign(gameState, payload.new.data);
-                            render();
-                        }
-                    }
-                )
-                .subscribe();
-
-            // Charger l'état initial
-            db.from('games')
-                .select('data')
-                .eq('room_code', code)
-                .single()
-                .then(({ data }) => {
-                    if (data && data.data) {
-                        Object.assign(gameState, data.data);
-                        render();
-                    }
-                });
+        async function loadGame(code) {
+            try {
+                const { data } = await db.from('games').select('data').eq('room_code', code).single();
+                if (data && data.data) {
+                    const myName = gameState.playerName;
+                    const myCode = gameState.roomCode;
+                    Object.assign(gameState, data.data);
+                    gameState.playerName = myName;
+                    gameState.roomCode = myCode;
+                    render();
+                }
+            } catch (err) {
+                console.error('Load error:', err);
+            }
         }
 
         async function refreshLobby() {
-            if (!gameState.roomCode) return;
-            const { data } = await db.from('games').select('data').eq('room_code', gameState.roomCode).single();
-            if (data && data.data) {
-                gameState.players = data.data.players;
-                render();
-            }
+            await loadGame(gameState.roomCode);
         }
             if (subscription) subscription.unsubscribe();
             
@@ -151,14 +162,14 @@
             }];
 
             await saveGame();
-            listenToRoom(gameState.roomCode);
+            startPolling(gameState.roomCode);
             render();
         }
 
         async function joinRoom() {
             if (!gameState.playerName || !gameState.roomCode) return alert('Remplissez tout');
             
-            listenToRoom(gameState.roomCode);
+            await loadGame(gameState.roomCode);
             
             setTimeout(async () => {
                 if (!gameState.players.find(p => p.name === gameState.playerName)) {
@@ -171,8 +182,9 @@
                     await saveGame();
                 }
                 gameState.screen = 'lobby';
+                startPolling(gameState.roomCode);
                 render();
-            }, 1000);
+            }, 500);
         }
 
         async function startGame() {
